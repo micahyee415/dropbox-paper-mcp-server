@@ -1,0 +1,2 @@
+# False positive: dropbox-api-token rule matches the `import { DropboxClient, ... }` line (no secret).
+src/tools/files.ts:dropbox-api-token:23

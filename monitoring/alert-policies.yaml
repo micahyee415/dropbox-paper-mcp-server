@@ -1,0 +1,290 @@
+# Cloud Monitoring Alert Policies — dropbox-mcp-server
+#
+# Project: your-gcp-project
+# Service: dropbox-mcp-server (Cloud Run)
+# GCP region: us-central1 (adjust to your actual region)
+#
+# Deploy with:
+#   gcloud alpha monitoring policies import monitoring/alert-policies.yaml \
+#     --project=your-gcp-project
+#
+# All policies alert to the "dropbox-mcp-oncall" notification channel.
+# Replace the notification_channels value with your actual channel ID:
+#   gcloud alpha monitoring channels list --project=your-gcp-project
+#
+# IMPORTANT: Log-based metrics (error rate, slo_breach, health_check failures,
+# permanently_delete events) must be created BEFORE deploying these alerts.
+# See monitoring/log-based-metrics.yaml for those definitions.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Policy 1: Error Rate > 5%
+#
+# Uses a log-based metric that counts requests where outcome="error".
+# The denominator is total completed requests (event="usage").
+# Alert fires when error_rate > 5% over a 5-minute rolling window.
+# ─────────────────────────────────────────────────────────────────────────────
+
+displayName: "Dropbox MCP — Error Rate > 5%"
+combiner: OR
+conditions:
+  - displayName: "error_rate_5pct"
+    conditionThreshold:
+      filter: >
+        resource.type="cloud_run_revision"
+        AND resource.labels.service_name="dropbox-mcp-server"
+        AND metric.type="logging.googleapis.com/user/dropbox_mcp_error_rate"
+      aggregations:
+        - alignmentPeriod: 300s
+          crossSeriesReducer: REDUCE_MEAN
+          perSeriesAligner: ALIGN_MEAN
+      comparison: COMPARISON_GT
+      thresholdValue: 0.05
+      duration: 0s
+      trigger:
+        count: 1
+alertStrategy:
+  autoClose: 1800s
+notificationChannels:
+  - "projects/your-gcp-project/notificationChannels/REPLACE_WITH_CHANNEL_ID"
+documentation:
+  content: |
+    ## Dropbox MCP Error Rate Alert
+
+    **What fired:** More than 5% of MCP tool calls in the last 5 minutes
+    returned outcome="error".
+
+    **Impact:** Users may be getting errors when accessing Dropbox via Claude.
+
+    **Immediate investigation:**
+    1. Open Cloud Logging: resource.labels.service_name="dropbox-mcp-server" AND jsonPayload.outcome="error"
+    2. Check the `tool` and `reason` fields to identify which tool(s) are failing
+    3. Check the `userEmail` field — is one user causing all errors?
+    4. Check Dropbox API status: https://status.dropbox.com
+
+    **Common causes:**
+    - Dropbox API outage or degradation
+    - Invalid file paths in tool arguments
+    - Dropbox token refresh failure (check for "token" in reason)
+    - Permission errors (user doesn't have access to path)
+
+    **Runbook:** See RUNBOOK.md in the dropbox-mcp-server repo.
+  mimeType: text/markdown
+
+---
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Policy 2: p99 Latency > 5 seconds (SLO breach)
+#
+# Uses a log-based metric counting requests with event="slo_breach".
+# A slo_breach log line is emitted whenever a request exceeds 5000ms.
+# Alert fires when any slo_breach events appear in a 5-minute window.
+# ─────────────────────────────────────────────────────────────────────────────
+
+displayName: "Dropbox MCP — Latency SLO Breach (>5s)"
+combiner: OR
+conditions:
+  - displayName: "latency_slo_breach"
+    conditionThreshold:
+      filter: >
+        resource.type="cloud_run_revision"
+        AND resource.labels.service_name="dropbox-mcp-server"
+        AND metric.type="logging.googleapis.com/user/dropbox_mcp_slo_breach_count"
+      aggregations:
+        - alignmentPeriod: 300s
+          crossSeriesReducer: REDUCE_SUM
+          perSeriesAligner: ALIGN_SUM
+      comparison: COMPARISON_GT
+      thresholdValue: 0
+      duration: 0s
+      trigger:
+        count: 1
+alertStrategy:
+  autoClose: 1800s
+notificationChannels:
+  - "projects/your-gcp-project/notificationChannels/REPLACE_WITH_CHANNEL_ID"
+documentation:
+  content: |
+    ## Dropbox MCP Latency SLO Breach
+
+    **What fired:** One or more MCP requests took longer than 5 seconds in
+    the last 5 minutes, breaching the p99 latency SLO.
+
+    **SLO target:** p99 latency < 5s
+
+    **Immediate investigation:**
+    1. Open Cloud Logging: resource.labels.service_name="dropbox-mcp-server" AND jsonPayload.event="slo_breach"
+    2. Check the `tool` and `durationMs` fields — which tools are slow?
+    3. Check `userEmail` — is one user hitting large files?
+    4. Check Cloud Run CPU/memory metrics — is the instance saturated?
+
+    **Common causes:**
+    - Large file downloads or uploads (download_file, upload_file with big content)
+    - Dropbox API slowness (especially for search_files on large accounts)
+    - Cloud Run cold start if min-instances=0
+    - Memory pressure causing GC pauses
+
+    **Runbook:** See RUNBOOK.md in the dropbox-mcp-server repo.
+  mimeType: text/markdown
+
+---
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Policy 3: Health Check Failures
+#
+# Uses a log-based metric counting health check logs where outcome="error".
+# Cloud Run probes /health every 30s. If 3 consecutive checks fail within
+# a 5-minute window, alert fires.
+# ─────────────────────────────────────────────────────────────────────────────
+
+displayName: "Dropbox MCP — Health Check Failures"
+combiner: OR
+conditions:
+  - displayName: "health_check_failure"
+    conditionThreshold:
+      filter: >
+        resource.type="cloud_run_revision"
+        AND resource.labels.service_name="dropbox-mcp-server"
+        AND metric.type="logging.googleapis.com/user/dropbox_mcp_health_check_failure_count"
+      aggregations:
+        - alignmentPeriod: 300s
+          crossSeriesReducer: REDUCE_SUM
+          perSeriesAligner: ALIGN_SUM
+      comparison: COMPARISON_GT
+      thresholdValue: 2
+      duration: 0s
+      trigger:
+        count: 1
+alertStrategy:
+  autoClose: 900s
+notificationChannels:
+  - "projects/your-gcp-project/notificationChannels/REPLACE_WITH_CHANNEL_ID"
+documentation:
+  content: |
+    ## Dropbox MCP Health Check Failure
+
+    **What fired:** The /health endpoint returned outcome="error" 3+ times
+    in the last 5 minutes. This means the Dropbox team token is invalid
+    or the Dropbox API is unreachable.
+
+    **Impact:** All MCP tool calls will fail. Users cannot access Dropbox
+    from Claude.
+
+    **Immediate action:**
+    1. Open Cloud Logging: resource.labels.service_name="dropbox-mcp-server" AND jsonPayload.event="health_check" AND jsonPayload.outcome="error"
+    2. Check the `reason` field for the exact error
+    3. Verify Dropbox token in Secret Manager: DROPBOX_REFRESH_TOKEN
+    4. Try running health check manually: curl https://[service-url]/health
+    5. Check Dropbox API status: https://status.dropbox.com
+
+    **Token rotation:**
+    If the refresh token is invalid, generate a new one via the Dropbox
+    App Console and update in GCP Secret Manager, then redeploy.
+
+    **Runbook:** See RUNBOOK.md in the dropbox-mcp-server repo.
+  mimeType: text/markdown
+
+---
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Policy 4: Permanent Delete Events (Audit Alert)
+#
+# The permanently_delete_file tool logs at ERROR severity with
+# event="permanent_delete". Any invocation fires this alert so IT
+# can review the action in Cloud Logging for SOC 2 compliance.
+# ─────────────────────────────────────────────────────────────────────────────
+
+displayName: "Dropbox MCP — Permanent Delete Action (Audit)"
+combiner: OR
+conditions:
+  - displayName: "permanent_delete_invoked"
+    conditionThreshold:
+      filter: >
+        resource.type="cloud_run_revision"
+        AND resource.labels.service_name="dropbox-mcp-server"
+        AND metric.type="logging.googleapis.com/user/dropbox_mcp_permanent_delete_count"
+      aggregations:
+        - alignmentPeriod: 60s
+          crossSeriesReducer: REDUCE_SUM
+          perSeriesAligner: ALIGN_SUM
+      comparison: COMPARISON_GT
+      thresholdValue: 0
+      duration: 0s
+      trigger:
+        count: 1
+alertStrategy:
+  autoClose: 86400s
+notificationChannels:
+  - "projects/your-gcp-project/notificationChannels/REPLACE_WITH_CHANNEL_ID"
+documentation:
+  content: |
+    ## Dropbox MCP — Permanent Delete Invoked (Audit Alert)
+
+    **What fired:** A user invoked permanently_delete_file, which
+    irreversibly removes a file with no recovery possible.
+
+    This is an audit notification, not necessarily an incident.
+    Review the action to confirm it was intentional.
+
+    **Audit steps:**
+    1. Open Cloud Logging: resource.labels.service_name="dropbox-mcp-server" AND jsonPayload.event="permanent_delete"
+    2. Note the `userEmail` and `dropboxPath` fields
+    3. Confirm with the user that this was intentional if the path looks sensitive
+    4. Log the finding in the SOC 2 audit trail if required
+
+    **Fields to capture for audit record:**
+    - userEmail
+    - dropboxPath
+    - requestId (for correlating the full request context)
+    - timestamp
+  mimeType: text/markdown
+
+---
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Policy 5: Rate Limit Surge (abuse detection)
+#
+# Fires when a single user hits the rate limiter more than 5 times in 1 minute,
+# indicating possible runaway automation or abuse.
+# ─────────────────────────────────────────────────────────────────────────────
+
+displayName: "Dropbox MCP — Rate Limit Surge (Possible Abuse)"
+combiner: OR
+conditions:
+  - displayName: "rate_limit_surge"
+    conditionThreshold:
+      filter: >
+        resource.type="cloud_run_revision"
+        AND resource.labels.service_name="dropbox-mcp-server"
+        AND metric.type="logging.googleapis.com/user/dropbox_mcp_rate_limited_count"
+      aggregations:
+        - alignmentPeriod: 60s
+          crossSeriesReducer: REDUCE_SUM
+          perSeriesAligner: ALIGN_SUM
+      comparison: COMPARISON_GT
+      thresholdValue: 5
+      duration: 0s
+      trigger:
+        count: 1
+alertStrategy:
+  autoClose: 3600s
+notificationChannels:
+  - "projects/your-gcp-project/notificationChannels/REPLACE_WITH_CHANNEL_ID"
+documentation:
+  content: |
+    ## Dropbox MCP — Rate Limit Surge
+
+    **What fired:** More than 5 rate-limit (429) responses in the last minute,
+    suggesting one user is running automated requests at high volume.
+
+    **Immediate investigation:**
+    1. Open Cloud Logging: resource.labels.service_name="dropbox-mcp-server" AND jsonPayload.outcome="rate_limited"
+    2. Check the `userEmail` field to identify the source
+    3. Determine if the volume is expected (e.g., a legitimate automation) or anomalous
+
+    **Actions:**
+    - If legitimate: consider raising per-user rate limit for that user
+    - If anomalous: review their Claude conversation and contact the user
+    - If malicious: suspend their Google Workspace account and revoke Dropbox access
+
+    **Runbook:** See RUNBOOK.md in the dropbox-mcp-server repo.
+  mimeType: text/markdown

@@ -1,0 +1,48 @@
+steps:
+  # Step 1: Audit npm dependencies for known vulnerabilities
+  - name: "node:22-slim"
+    entrypoint: "npm"
+    args: ["audit", "--audit-level=high"]
+
+  # Step 2: Build the Docker image
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - build
+      - -t
+      - us-central1-docker.pkg.dev/$PROJECT_ID/mcp-servers/dropbox-mcp-server:$COMMIT_SHA
+      - -t
+      - us-central1-docker.pkg.dev/$PROJECT_ID/mcp-servers/dropbox-mcp-server:latest
+      - .
+
+  # Step 3: Push the image
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - push
+      - --all-tags
+      - us-central1-docker.pkg.dev/$PROJECT_ID/mcp-servers/dropbox-mcp-server
+
+  # Step 4: Deploy to Cloud Run
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: "gcloud"
+    args:
+      - run
+      - deploy
+      - dropbox-mcp-server
+      - --image=us-central1-docker.pkg.dev/$PROJECT_ID/mcp-servers/dropbox-mcp-server:$COMMIT_SHA
+      - --region=us-central1
+      - --platform=managed
+      - --no-allow-unauthenticated
+      - --set-secrets=DROPBOX_APP_KEY=dropbox-app-key:latest,DROPBOX_APP_SECRET=dropbox-app-secret:latest,DROPBOX_REFRESH_TOKEN=dropbox-refresh-token:latest,GOOGLE_CLIENT_ID=google-client-id-dropbox:latest,GOOGLE_CLIENT_SECRET=google-client-secret-dropbox:latest
+      - --min-instances=1
+      - --max-instances=5
+      - --memory=512Mi
+      - --cpu=1
+      - --timeout=60s
+      - --concurrency=80
+
+images:
+  - us-central1-docker.pkg.dev/$PROJECT_ID/mcp-servers/dropbox-mcp-server:$COMMIT_SHA
+  - us-central1-docker.pkg.dev/$PROJECT_ID/mcp-servers/dropbox-mcp-server:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY

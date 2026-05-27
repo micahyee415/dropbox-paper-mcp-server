@@ -1,0 +1,212 @@
+# Log-Based Metrics — dropbox-mcp-server
+#
+# Project: your-gcp-project
+# These metrics are derived from Cloud Logging structured log output.
+# They power the alert policies in alert-policies.yaml.
+#
+# Deploy with the gcloud CLI — there is no bulk import command for log-based
+# metrics, so create each one individually:
+#
+#   gcloud logging metrics create dropbox_mcp_error_rate \
+#     --description="Rate of error-outcome requests in dropbox-mcp-server" \
+#     --log-filter='resource.type="cloud_run_revision" resource.labels.service_name="dropbox-mcp-server" jsonPayload.event="usage" jsonPayload.outcome="error"' \
+#     --project=your-gcp-project
+#
+# Repeat for each metric below. After creation, metrics appear under:
+#   logging.googleapis.com/user/<metric_name>
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+metrics:
+
+  # ── 1. Error rate numerator ──────────────────────────────────────────────────
+  # Counts completed requests with outcome="error".
+  # Combined with total_requests to compute error percentage in alerts.
+
+  - name: dropbox_mcp_error_rate
+    description: "Completed MCP requests with outcome=error (tool call failed)"
+    filter: |
+      resource.type="cloud_run_revision"
+      resource.labels.service_name="dropbox-mcp-server"
+      jsonPayload.event="usage"
+      jsonPayload.outcome="error"
+    metricDescriptor:
+      metricKind: DELTA
+      valueType: INT64
+      unit: "1"
+      labels:
+        - key: tool
+          description: "MCP tool that was called"
+        - key: userEmail
+          description: "Authenticated user email"
+    labelExtractors:
+      tool: EXTRACT(jsonPayload.tool)
+      userEmail: EXTRACT(jsonPayload.userEmail)
+
+  # ── 2. Total request count ───────────────────────────────────────────────────
+  # Counts all completed MCP requests. Used as denominator for error rate.
+
+  - name: dropbox_mcp_request_count
+    description: "Total completed MCP requests"
+    filter: |
+      resource.type="cloud_run_revision"
+      resource.labels.service_name="dropbox-mcp-server"
+      jsonPayload.event="usage"
+    metricDescriptor:
+      metricKind: DELTA
+      valueType: INT64
+      unit: "1"
+      labels:
+        - key: tool
+          description: "MCP tool that was called"
+        - key: outcome
+          description: "Request outcome: success or error"
+        - key: userEmail
+          description: "Authenticated user email"
+    labelExtractors:
+      tool: EXTRACT(jsonPayload.tool)
+      outcome: EXTRACT(jsonPayload.outcome)
+      userEmail: EXTRACT(jsonPayload.userEmail)
+
+  # ── 3. SLO breach count ──────────────────────────────────────────────────────
+  # Counts requests that exceeded the 5s latency SLO.
+  # Emitted by index.ts when durationMs > 5000.
+
+  - name: dropbox_mcp_slo_breach_count
+    description: "MCP requests exceeding 5s latency SLO"
+    filter: |
+      resource.type="cloud_run_revision"
+      resource.labels.service_name="dropbox-mcp-server"
+      jsonPayload.event="slo_breach"
+    metricDescriptor:
+      metricKind: DELTA
+      valueType: INT64
+      unit: "1"
+      labels:
+        - key: tool
+          description: "MCP tool that caused the slow request"
+        - key: userEmail
+          description: "Authenticated user email"
+    labelExtractors:
+      tool: EXTRACT(jsonPayload.tool)
+      userEmail: EXTRACT(jsonPayload.userEmail)
+
+  # ── 4. Health check failure count ────────────────────────────────────────────
+  # Counts /health endpoint responses with outcome="error".
+
+  - name: dropbox_mcp_health_check_failure_count
+    description: "Health check failures (Dropbox API unreachable or token invalid)"
+    filter: |
+      resource.type="cloud_run_revision"
+      resource.labels.service_name="dropbox-mcp-server"
+      jsonPayload.event="health_check"
+      jsonPayload.outcome="error"
+    metricDescriptor:
+      metricKind: DELTA
+      valueType: INT64
+      unit: "1"
+
+  # ── 5. Permanent delete count ────────────────────────────────────────────────
+  # Counts permanently_delete_file invocations for SOC 2 audit alerting.
+  # Logged at ERROR severity (even on success) to ensure visibility.
+
+  - name: dropbox_mcp_permanent_delete_count
+    description: "Permanent file deletions — irreversible, requires audit review"
+    filter: |
+      resource.type="cloud_run_revision"
+      resource.labels.service_name="dropbox-mcp-server"
+      jsonPayload.event="permanent_delete"
+    metricDescriptor:
+      metricKind: DELTA
+      valueType: INT64
+      unit: "1"
+      labels:
+        - key: userEmail
+          description: "User who performed the permanent deletion"
+        - key: dropboxPath
+          description: "Path of the permanently deleted file/folder"
+    labelExtractors:
+      userEmail: EXTRACT(jsonPayload.userEmail)
+      dropboxPath: EXTRACT(jsonPayload.dropboxPath)
+
+  # ── 6. Rate limit count ──────────────────────────────────────────────────────
+  # Counts 429 rate-limit responses for abuse detection.
+
+  - name: dropbox_mcp_rate_limited_count
+    description: "Rate-limited requests (429 responses)"
+    filter: |
+      resource.type="cloud_run_revision"
+      resource.labels.service_name="dropbox-mcp-server"
+      jsonPayload.outcome="rate_limited"
+    metricDescriptor:
+      metricKind: DELTA
+      valueType: INT64
+      unit: "1"
+      labels:
+        - key: userEmail
+          description: "User who was rate limited"
+    labelExtractors:
+      userEmail: EXTRACT(jsonPayload.userEmail)
+
+  # ── 7. Auth failure count ────────────────────────────────────────────────────
+  # Counts authentication failures for security monitoring.
+
+  - name: dropbox_mcp_auth_failure_count
+    description: "Authentication failures (invalid token, domain, or non-Dropbox user)"
+    filter: |
+      resource.type="cloud_run_revision"
+      resource.labels.service_name="dropbox-mcp-server"
+      jsonPayload.outcome="auth_failure"
+    metricDescriptor:
+      metricKind: DELTA
+      valueType: INT64
+      unit: "1"
+
+  # ── 8. Shared link creation count ────────────────────────────────────────────
+  # Counts public shared links created — useful for access reviews.
+
+  - name: dropbox_mcp_shared_link_created_count
+    description: "Shared links created via create_shared_link"
+    filter: |
+      resource.type="cloud_run_revision"
+      resource.labels.service_name="dropbox-mcp-server"
+      jsonPayload.event="shared_link_created"
+      jsonPayload.outcome="success"
+    metricDescriptor:
+      metricKind: DELTA
+      valueType: INT64
+      unit: "1"
+      labels:
+        - key: userEmail
+          description: "User who created the shared link"
+        - key: linkAccess
+          description: "Access level: public, team_only, or password"
+    labelExtractors:
+      userEmail: EXTRACT(jsonPayload.userEmail)
+      linkAccess: EXTRACT(jsonPayload.linkAccess)
+
+  # ── 9. Request latency distribution ──────────────────────────────────────────
+  # Distribution metric for durationMs — enables p50/p95/p99 latency charts
+  # in Cloud Monitoring dashboards.
+
+  - name: dropbox_mcp_request_latency_ms
+    description: "MCP request latency in milliseconds"
+    filter: |
+      resource.type="cloud_run_revision"
+      resource.labels.service_name="dropbox-mcp-server"
+      jsonPayload.event="usage"
+    metricDescriptor:
+      metricKind: DELTA
+      valueType: DISTRIBUTION
+      unit: "ms"
+      labels:
+        - key: tool
+          description: "MCP tool that was called"
+    labelExtractors:
+      tool: EXTRACT(jsonPayload.tool)
+    valueExtractor: EXTRACT(jsonPayload.durationMs)
+    bucketOptions:
+      exponentialBuckets:
+        numFiniteBuckets: 20
+        growthFactor: 2.0
+        scale: 100
